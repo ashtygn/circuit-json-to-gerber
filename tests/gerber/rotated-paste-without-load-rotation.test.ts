@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import {
+  pcb_plated_hole,
   pcb_smtpad,
   pcb_solder_paste,
   type AnyCircuitElement,
@@ -40,8 +41,7 @@ const cases = (["rotated_rect", "rotated_pill"] as const).flatMap((shape) =>
   ),
 )
 
-// These assert the intended output; test.failing keeps the reproduction green.
-test.failing.each(cases)(
+test.each(cases)(
   "$shape $rotation degrees, $layer, flip=$flip_y_axis, $width x $height needs no LR",
   async ({ shape, rotation, layer, flip_y_axis, width, height }) => {
     const center = { x: 1.25, y: -0.75 }
@@ -159,6 +159,87 @@ test.failing.each(cases)(
     expect(circuitJson).toEqual(original)
   },
 )
+
+test.each(["rect", "pill"] as const)(
+  "legacy %s paste inherits plated-hole rotation, explicit zero overrides it",
+  async (shape) => {
+    const hole = pcb_plated_hole.parse({
+      type: "pcb_plated_hole",
+      shape: "pill",
+      x: 1,
+      y: -2,
+      outer_width: 2.4,
+      outer_height: 1.1,
+      hole_width: 1.2,
+      hole_height: 0.5,
+      ccw_rotation: 30,
+      layers: ["top", "bottom"],
+    })
+    for (const layer of ["top", "bottom"] as const) {
+      for (const flip_y_axis of [false, true]) {
+        const paste = pcb_solder_paste.parse({
+          type: "pcb_solder_paste",
+          shape,
+          layer,
+          x: 1,
+          y: -2,
+          width: 2.4,
+          height: 1.1,
+          radius: 0.55,
+        })
+        const layerName = layer === "top" ? "F_Paste" : "B_Paste"
+        const exportPaste = (element: AnyCircuitElement) =>
+          convertCircuitJsonToGerberFiles([board, hole, element], {
+            flip_y_axis,
+          })[`${layerName}.gbr`].replace(
+            /^.*(?:CreationDate|Created by tscircuit).*\n/gm,
+            "",
+          )
+        const rotatedPaste = pcb_solder_paste.parse({
+          ...paste,
+          shape: shape === "rect" ? "rotated_rect" : "rotated_pill",
+          ccw_rotation: 30,
+        })
+        expect(exportPaste(paste)).toEqual(exportPaste(rotatedPaste))
+        expect(exportPaste(paste)).not.toContain("%LR")
+        await renderGerberFileSvg(exportPaste(paste), "legacy-paste", "#999999")
+
+        const explicitZero = { ...paste, ccw_rotation: 0 }
+        const commands = convertCircuitJsonToGerberCommands(
+          [board, hole, explicitZero],
+          { flip_y_axis },
+        )
+        expect(regionPoints(commands[layerName])).toEqual([])
+        expect(
+          commands[layerName].filter((c) => c.command_code === "D03"),
+        ).toEqual([{ command_code: "D03", x: 1, y: flip_y_axis ? 2 : -2 }])
+      }
+    }
+  },
+)
+
+test("equal-width-and-height rotated pill paste is a circle", async () => {
+  const paste = pcb_solder_paste.parse({
+    type: "pcb_solder_paste",
+    shape: "rotated_pill",
+    layer: "top",
+    x: 1,
+    y: -2,
+    width: 1.1,
+    height: 1.1,
+    radius: 0.55,
+    ccw_rotation: 30,
+  })
+  const files = convertCircuitJsonToGerberFiles([board, paste])
+  expect(files["F_Paste.gbr"]).not.toContain("%LR")
+  const { viewBox } = await renderGerberFileSvg(
+    files["F_Paste.gbr"],
+    "circle-paste",
+    "#999999",
+  )
+  expect(viewBox[2]).toBeCloseTo(1100, 3)
+  expect(viewBox[3]).toBeCloseTo(1100, 3)
+})
 
 for (const layer of ["top", "bottom"] as const) {
   for (const flip_y_axis of [false, true]) {

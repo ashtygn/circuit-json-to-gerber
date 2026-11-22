@@ -420,6 +420,26 @@ export const getApertureConfigFromPcbFabricationNoteDimension = (
   }
 }
 
+export const getSolderPasteRotation = (
+  element: PcbSolderPaste,
+  circuitJson: AnyCircuitElement[],
+) => {
+  if ("ccw_rotation" in element && typeof element.ccw_rotation === "number") {
+    return element.ccw_rotation
+  }
+  if (element.shape === "polygon") return 0
+  // Legacy paste elements inherit rotation from the matching plated hole.
+  const platedHole = circuitJson.find(
+    (candidate): candidate is PCBPlatedHole & { ccw_rotation: number } =>
+      candidate.type === "pcb_plated_hole" &&
+      candidate.x === element.x &&
+      candidate.y === element.y &&
+      "ccw_rotation" in candidate &&
+      typeof candidate.ccw_rotation === "number",
+  )
+  return platedHole?.ccw_rotation ?? 0
+}
+
 export const getApertureConfigFromPcbSolderPaste = (
   elm: PcbSolderPaste,
 ): ApertureTemplateConfig => {
@@ -431,7 +451,7 @@ export const getApertureConfigFromPcbSolderPaste = (
     }
   }
   if (elm.shape === "rotated_rect") {
-    // Rotation is handled by the LR command, not the aperture definition
+    // Rotated paste is rendered as a region; this definition is not flashed.
     return {
       standard_template_code: "R",
       x_size: elm.width,
@@ -445,7 +465,7 @@ export const getApertureConfigFromPcbSolderPaste = (
     }
   }
   if (elm.shape === "pill" || elm.shape === "rotated_pill") {
-    // rotated_pill rotation is handled by the LR command at flash time
+    // Nonzero rotations are rendered with a circular aperture and a stroke.
     if (!("width" in elm && "height" in elm)) {
       throw new Error(
         "Invalid pill shape in getApertureConfigFromPcbPlatedHole: missing dimensions",
@@ -754,6 +774,26 @@ function getAllApertureTemplateConfigsForLayer({
         if (elm.shape === "oval" || elm.shape === "polygon") {
           addConfigIfNew(REGION_APERTURE_CONFIG)
           continue
+        }
+        if (glayer_name.endsWith("_Paste")) {
+          const rotation = getSolderPasteRotation(elm, circuitJson)
+          if (
+            elm.shape === "rotated_rect" ||
+            (elm.shape === "rect" && rotation !== 0)
+          ) {
+            addConfigIfNew(REGION_APERTURE_CONFIG)
+            continue
+          }
+          if (
+            (elm.shape === "pill" || elm.shape === "rotated_pill") &&
+            rotation !== 0
+          ) {
+            addConfigIfNew({
+              standard_template_code: "C",
+              diameter: Math.min(elm.width, elm.height),
+            })
+            continue
+          }
         }
         addConfigIfNew(getApertureConfigFromPcbSolderPaste(elm))
         if (elm.shape === "pill") {

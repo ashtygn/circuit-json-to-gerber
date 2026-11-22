@@ -3,12 +3,7 @@ import {
   getPillApertureConfig,
   type CopperApertureFunction,
 } from "./defineAperturesForLayer"
-import type {
-  AnyCircuitElement,
-  PcbPlatedHole,
-  PcbViaInput,
-  PcbVia,
-} from "circuit-json"
+import type { AnyCircuitElement, PcbViaInput, PcbVia } from "circuit-json"
 import { pairs } from "../utils/pairs"
 import { gerberBuilder } from "../gerber-builder"
 import type { LayerToGerberCommandsMap } from "./GerberLayerName"
@@ -28,6 +23,7 @@ import {
   getApertureConfigFromPcbSmtpad,
   getApertureConfigFromPcbSmtpadSoldermask,
   getApertureConfigFromPcbSolderPaste,
+  getSolderPasteRotation,
   getApertureConfigFromOuterDiameter,
 } from "./defineAperturesForLayer"
 import type { PcbCutout } from "circuit-json"
@@ -1479,56 +1475,48 @@ export const convertCircuitJsonToGerberCommands = (
           }
 
           const glayer = glayers[getGerberLayerName(layer, "paste")]
-          let rotation = 0
-          if (
-            "ccw_rotation" in element &&
-            typeof element.ccw_rotation === "number"
-          ) {
-            rotation = element.ccw_rotation
-          } else {
-            // Solder paste has no rotation, so use the matching plated hole's rotation.
-            const platedHole = circuitJson.find(
-              (
-                candidate,
-              ): candidate is PcbPlatedHole & { ccw_rotation: number } =>
-                candidate.type === "pcb_plated_hole" &&
-                candidate.x === element.x &&
-                candidate.y === element.y &&
-                "ccw_rotation" in candidate &&
-                typeof candidate.ccw_rotation === "number",
-            )
-            if (platedHole) {
-              rotation = platedHole.ccw_rotation
-            }
-          }
+          const rotation = getSolderPasteRotation(element, circuitJson)
 
-          let apertureConfig = getApertureConfigFromPcbSolderPaste(element)
+          // Encode rotation in coordinates, as for copper and solder mask.
+          // Some Gerber readers ignore LR and would leave paste unrotated.
           if (
-            element.shape === "pill" &&
-            (rotation === 90 || rotation === 270)
+            element.shape === "rotated_rect" ||
+            (element.shape === "rect" && rotation !== 0)
           ) {
-            apertureConfig = getApertureConfigFromPcbSolderPaste({
-              ...element,
-              width: element.height,
-              height: element.width,
+            addClosedRegionFromPoints({
+              target: glayer,
+              apertureSource: glayer,
+              points: getRotatedRectPoints({
+                center: { x: element.x, y: element.y },
+                width: element.width,
+                height: element.height,
+                ccwRotationDegrees: rotation,
+              }),
             })
-            rotation = 0
+            continue
+          }
+          if (
+            (element.shape === "pill" || element.shape === "rotated_pill") &&
+            rotation !== 0
+          ) {
+            renderPillFlash({
+              glayer,
+              x: element.x,
+              y: element.y,
+              width: element.width,
+              height: element.height,
+              rotationDegrees: rotation,
+            })
+            continue
           }
 
+          const apertureConfig = getApertureConfigFromPcbSolderPaste(element)
           const aperture_number = findApertureNumber(glayer, apertureConfig)
 
           const gb = gerberBuilder().add("select_aperture", {
             aperture_number,
           })
-          if (rotation) {
-            gb.add("load_rotation", {
-              rotation_degrees: rotation,
-            })
-          }
           gb.add("flash_operation", { x: element.x, y: mfy(element.y) })
-          if (rotation) {
-            gb.add("load_rotation", { rotation_degrees: 0 })
-          }
           glayer.push(...gb.build())
         }
       } else if (element.type === "pcb_plated_hole") {
